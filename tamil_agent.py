@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -11,14 +12,19 @@ from livekit.agents import (
     JobProcess,
     MetricsCollectedEvent,
     RunContext,
+    APIConnectOptions,
     cli,
     metrics,
     room_io,
+    tts,
+    utils,
 )
 from livekit.agents.llm import function_tool
-from livekit.plugins import deepgram, silero, openai, google
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit.agents.tts.stream_adapter import StreamAdapter
+from livekit.plugins import deepgram, silero, google
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
+import httpx
+from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 
 logger = logging.getLogger("indic-agent")
 
@@ -82,6 +88,49 @@ class MyAgent(Agent):
         return "sunny with a temperature of 70 degrees."
 
 
+class Sub200TTS(tts.TTS):
+    """Non-streaming TTS that posts text to a local sub200 bridge returning OGG/Opus bytes."""
+
+    def __init__(self, *, endpoint: str, sample_rate: int = 24000) -> None:
+        super().__init__(capabilities=tts.TTSCapabilities(streaming=False), sample_rate=sample_rate, num_channels=1)
+        self._endpoint = endpoint.rstrip("/")
+        self._sample_rate = sample_rate
+
+    @property
+    def model(self) -> str:
+        return "sub200-tts"
+
+    @property
+    def provider(self) -> str:
+        return "sub200"
+
+    def synthesize(self, text: str, *, conn_options: APIConnectOptions = DEFAULT_API_CONNECT_OPTIONS):
+        return _Sub200ChunkedStream(tts=self, input_text=text, conn_options=conn_options)
+
+
+class _Sub200ChunkedStream(tts.ChunkedStream):
+    def __init__(self, *, tts: Sub200TTS, input_text: str, conn_options: APIConnectOptions) -> None:
+        super().__init__(tts=tts, input_text=input_text, conn_options=conn_options)
+        self._tts = tts
+
+    async def _run(self, output_emitter: tts.AudioEmitter) -> None:
+        async with httpx.AsyncClient(timeout=self._conn_options.timeout) as client:
+            resp = await client.post(
+                f"{self._tts._endpoint}/tts",
+                json={"text": self._input_text},
+            )
+            resp.raise_for_status()
+            audio_bytes = resp.content
+
+        output_emitter.initialize(
+            request_id=utils.shortuuid(),
+            sample_rate=self._tts._sample_rate,
+            num_channels=1,
+            mime_type="audio/opus",
+        )
+        output_emitter.push(audio_bytes)
+
+
 server = AgentServer()
 
 
@@ -98,6 +147,9 @@ async def entrypoint(ctx: JobContext):
     ctx.log_context_fields = {
         "room": ctx.room.name,
     }
+    # Local sub200 TTS bridge (POST /tts returns OGG_OPUS bytes).
+    sub200_tts_url = os.environ.get("SUB200_TTS_URL") or os.environ.get("TTS_PROXY_URL")
+
     session = AgentSession(
         # Speech-to-text (STT) - Deepgram for Hindi
         stt=deepgram.STT(
@@ -109,19 +161,10 @@ async def entrypoint(ctx: JobContext):
             model="gemini-2.0-flash",
             api_key=os.environ.get("GEMINI_API_KEY"),
         ),
-        # TTS - Google Cloud TTS (Hindi, female Neural2 voice, non-streaming)
-        # Streaming synthesis currently only supports Chirp3 HD voices; to use Hindi Neural2
-        # reliably we disable streaming and use standard synthesize_speech.
-        tts=google.TTS(
-            language="hi-IN",
-            gender="female",
-            voice_name="hi-IN-Neural2-A",
-            speaking_rate=1.0,
-            use_streaming=False,
-            credentials_file=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
-        ),
-        # VAD and turn detection are used to determine when the user is speaking and when the agent should respond
-        turn_detection=MultilingualModel(),
+        # TTS - sub200 bridge (OGG/Opus)
+        tts=Sub200TTS(endpoint=sub200_tts_url),
+        # Turn detection disabled to avoid timeout issues; rely on VAD/silence to segment turns.
+        turn_detection=None,
         vad=ctx.proc.userdata["vad"],
         # allow the LLM to generate a response while waiting for the end of turn
         preemptive_generation=False,
