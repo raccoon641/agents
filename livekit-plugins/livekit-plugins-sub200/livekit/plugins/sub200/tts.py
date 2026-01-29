@@ -35,7 +35,7 @@ from livekit.agents.types import (
 )
 from livekit.agents.utils import is_given
 
-SUB200_BASE_URL: Final[str] = "http://tts.sub200.dev/indic-19/v1/tts/generate"
+SUB200_BASE_URL: Final[str] = "http://34.85.39.79/indic-19/v1/tts/generate"
 NUM_CHANNELS: Final[int] = 1
 MIME_TYPE: Final[str] = "audio/wav"
 
