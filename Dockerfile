@@ -65,9 +65,9 @@ USER appuser
 # Pre-download any ML models or files the agent needs
 # This ensures the container is ready to run immediately without downloading
 # dependencies at runtime, which improves startup time and reliability
-RUN uv run "tamil_agent.py" download-files
+RUN uv run "ai_dost_telgu.py" download-files
 
 # Run the application using UV
 # UV will activate the virtual environment and run the agent.
 # The "start" command tells the worker to connect to LiveKit and begin waiting for jobs.
-CMD ["uv", "run", "tamil_agent.py", "start"]
+CMD ["uv", "run", "ai_dost_telgu.py", "start"]
